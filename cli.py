@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from prompts import list_modes
+from prompts import get_mode, list_modes
 from summarizer import ComparisonResult, SummaryResult, Summarizer
 
 
@@ -82,7 +82,9 @@ def _read_input(args: argparse.Namespace) -> str:
         return args.text
 
     if not sys.stdin.isatty():
-        return sys.stdin.read()
+        piped = sys.stdin.read()
+        if piped.strip():
+            return piped
 
     sys.exit(
         "Error: no input. Use --file, --text, or pipe text via stdin.\n"
@@ -127,6 +129,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {name:<10}  {description}")
         return 0
 
+    # Validate mode up front so a bad mode name doesn't get shadowed by
+    # a later provider-init error (e.g., missing API key).
+    try:
+        get_mode(args.mode)
+    except ValueError as e:
+        sys.exit(f"Error: {e}")
+
     text = _read_input(args)
 
     summarizer = Summarizer(
@@ -134,10 +143,26 @@ def main(argv: list[str] | None = None) -> int:
         anthropic_model=args.anthropic_model,
     )
 
-    if args.compare:
-        result = summarizer.compare(
+    try:
+        if args.compare:
+            result = summarizer.compare(
+                text=text,
+                mode=args.mode,
+                target_length=args.target_length,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+            )
+            if args.json:
+                print(json.dumps(result.to_dict(), indent=2))
+            else:
+                print(_format_comparison(result))
+            any_failed = not (result.openai.succeeded and result.anthropic.succeeded)
+            return 1 if any_failed else 0
+
+        result = summarizer.summarize(
             text=text,
             mode=args.mode,
+            provider=args.provider,
             target_length=args.target_length,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
@@ -145,23 +170,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(result.to_dict(), indent=2))
         else:
-            print(_format_comparison(result))
-        any_failed = not (result.openai.succeeded and result.anthropic.succeeded)
-        return 1 if any_failed else 0
-
-    result = summarizer.summarize(
-        text=text,
-        mode=args.mode,
-        provider=args.provider,
-        target_length=args.target_length,
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
-    )
-    if args.json:
-        print(json.dumps(result.to_dict(), indent=2))
-    else:
-        print(_format_result(result))
-    return 0 if result.succeeded else 1
+            print(_format_result(result))
+        return 0 if result.succeeded else 1
+    except (ValueError, ImportError) as e:
+        # Configuration errors (missing API key, bad mode, missing SDK) —
+        # show cleanly instead of a traceback.
+        sys.exit(f"Error: {e}")
 
 
 if __name__ == "__main__":
